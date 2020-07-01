@@ -7,7 +7,7 @@ src_dir="$(realpath "${this_dir}/..")"
 
 # -----------------------------------------------------------------------------
 
-: "${PLATFORMS=linux/amd64,linux/arm/v7,linux/arm64}"
+: "${PLATFORMS=linux/amd64,linux/arm/v7,linux/arm64,linux/armv6}"
 : "${DOCKER_REGISTRY=docker.io}"
 
 DOCKERFILE="${src_dir}/Dockerfile"
