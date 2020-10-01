@@ -201,7 +201,7 @@ class DialogueHermesMqtt(HermesClient):
             if not site_session:
                 # Create new session just for TTS
                 _LOGGER.debug("Starting new session (id=%s)", new_session.session_id)
-                self.session_by_site[site_session.site_id] = new_session
+                self.session_by_site[new_session.site_id] = new_session
 
                 yield DialogueSessionStarted(
                     site_id=new_session.site_id,
@@ -299,7 +299,9 @@ class DialogueHermesMqtt(HermesClient):
 
             # Set up timeout
             asyncio.create_task(
-                self.handle_session_timeout(new_session.session_id, new_session.step)
+                self.handle_session_timeout(
+                    new_session.site_id, new_session.session_id, new_session.step
+                )
             )
 
     async def handle_continue(
@@ -370,7 +372,9 @@ class DialogueHermesMqtt(HermesClient):
 
             # Set up timeout
             asyncio.create_task(
-                self.handle_session_timeout(site_session.session_id, site_session.step)
+                self.handle_session_timeout(
+                    site_session.site_id, site_session.session_id, site_session.step
+                )
             )
 
         except Exception as e:
@@ -439,20 +443,22 @@ class DialogueHermesMqtt(HermesClient):
 
         yield DialogueSessionEnded(
             site_id=site_id,
-            session_id=session.session_id,
+            session_id=site_session.session_id,
             custom_data=site_session.custom_data,
             termination=DialogueSessionTermination(reason=reason),
         )
 
         # Check session queue
-        if self.session_queue:
+        session_queue = self.session_queue_by_site[site_session.site_id]
+        if session_queue:
             _LOGGER.debug("Handling queued session")
-            async for start_result in self.start_session(self.session_queue.popleft()):
+            async for start_result in self.start_session(session_queue.popleft()):
                 yield start_result
         else:
             # Enable hotword if no queued sessions
             yield HotwordToggleOn(
-                site_id=session.site_id, reason=HotwordToggleReason.DIALOGUE_SESSION
+                site_id=site_session.site_id,
+                reason=HotwordToggleReason.DIALOGUE_SESSION,
             )
 
     async def handle_text_captured(
@@ -473,7 +479,7 @@ class DialogueHermesMqtt(HermesClient):
             _LOGGER.debug("Received text: %s", text_captured.text)
 
             # Record result
-            self.session.text_captured = text_captured
+            site_session.text_captured = text_captured
 
             # Stop listening
             yield AsrStopListening(
@@ -586,14 +592,15 @@ class DialogueHermesMqtt(HermesClient):
             ):
                 yield play_wake_result
 
-            if self.session:
+            site_session = self.session_by_site.get(detected.site_id)
+            if site_session:
                 # Jump the queue
-                self.session_queue.appendleft(new_session)
+                self.session_queue_by_site[site_session.site_id].appendleft(new_session)
 
                 # Abort previous session
                 async for end_result in self.end_session(
                     DialogueSessionTerminationReason.ABORTED_BY_USER,
-                    site_id=self.session.site_id,
+                    site_id=detected.site_id,
                 ):
                     yield end_result
             else:
@@ -606,22 +613,22 @@ class DialogueHermesMqtt(HermesClient):
                 error=str(e), context=str(detected), site_id=detected.site_id
             )
 
-    async def handle_session_timeout(self, session_id: str, step: int):
+    async def handle_session_timeout(self, site_id: str, session_id: str, step: int):
         """Called when a session has timed out."""
-        site_id = self.site_id
-
         try:
             # Pause execution until timeout
             await asyncio.sleep(self.session_timeout)
 
             # Check if we're still on the same session and step (i.e., no continues)
+
+            site_session = self.session_by_site.get(site_id)
+
             if (
-                self.session
-                and (self.session.session_id == session_id)
-                and (self.session.step == step)
+                site_session
+                and (site_session.session_id == session_id)
+                and (site_session.step == step)
             ):
-                _LOGGER.error("Session timed out: %s", session_id)
-                site_id = self.session.site_id
+                _LOGGER.error("Session timed out for site %s: %s", site_id, session_id)
 
                 # Abort session
                 await self.publish_all(
@@ -845,8 +852,9 @@ class DialogueHermesMqtt(HermesClient):
 
     def valid_session_id(self, session_id: str) -> bool:
         """True if payload session_id matches current session_id."""
-        if self.session:
-            return session_id == self.session.session_id
+        for site_session in self.session_by_site.values():
+            if session_id == site_session.session_id:
+                return True
 
-        # No current session
+        # No matching session
         return False
