@@ -196,7 +196,9 @@ class DialogueHermesMqtt(HermesClient):
         if start_session.init.type == DialogueActionType.NOTIFICATION:
             # Notification session
             notification = start_session.init
-            assert isinstance(notification, DialogueNotification)
+            assert isinstance(
+                notification, DialogueNotification
+            ), "Not a DialogueNotification"
 
             if not site_session:
                 # Create new session just for TTS
@@ -229,7 +231,7 @@ class DialogueHermesMqtt(HermesClient):
         else:
             # Action session
             action = start_session.init
-            assert isinstance(action, DialogueAction)
+            assert isinstance(action, DialogueAction), "Not a DialogueAction"
 
             new_session.custom_data = start_session.custom_data
             new_session.intent_filter = action.intent_filter
@@ -391,7 +393,9 @@ class DialogueHermesMqtt(HermesClient):
     ) -> typing.AsyncIterable[typing.Union[EndSessionType, StartSessionType, SayType]]:
         """End the current session."""
         site_session = self.session_by_site.get(end_session.site_id)
-        assert site_session is not None, f"No session at site {end_session.site_id}"
+        if not site_session:
+            _LOGGER.warning("No session at site %s", end_session.site_id)
+            return
 
         try:
             # Say text before ending session
@@ -433,7 +437,9 @@ class DialogueHermesMqtt(HermesClient):
     ) -> typing.AsyncIterable[typing.Union[EndSessionType, StartSessionType, SayType]]:
         """End current session and start queued session."""
         site_session = self.session_by_site.pop(site_id, None)
-        assert site_session is not None, f"No session for site {site_id}"
+        if not site_session:
+            _LOGGER.warning("No session for site %s", site_id)
+            return
 
         if site_session.start_session.init.type != DialogueActionType.NOTIFICATION:
             # Stop listening
