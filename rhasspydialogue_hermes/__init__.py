@@ -138,6 +138,7 @@ class DialogueHermesMqtt(HermesClient):
         )
 
         self.session_by_site: typing.Dict[str, SessionInfo] = {}
+        self.all_sessions: typing.Dict[str, SessionInfo] = {}
         self.session_queue_by_site: typing.Dict[
             str, typing.Deque[SessionInfo]
         ] = defaultdict(deque)
@@ -203,6 +204,7 @@ class DialogueHermesMqtt(HermesClient):
             if not site_session:
                 # Create new session just for TTS
                 _LOGGER.debug("Starting new session (id=%s)", new_session.session_id)
+                self.all_sessions[new_session.session_id] = new_session
                 self.session_by_site[new_session.site_id] = new_session
 
                 yield DialogueSessionStarted(
@@ -225,7 +227,9 @@ class DialogueHermesMqtt(HermesClient):
             # End notification session immedately
             _LOGGER.debug("Session ended nominally: %s", site_session.session_id)
             async for end_result in self.end_session(
-                DialogueSessionTerminationReason.NOMINAL, site_id=site_session.site_id
+                DialogueSessionTerminationReason.NOMINAL,
+                site_id=site_session.site_id,
+                session_id=site_session.session_id,
             ):
                 yield end_result
         else:
@@ -256,6 +260,7 @@ class DialogueHermesMqtt(HermesClient):
             else:
                 # Start new session
                 _LOGGER.debug("Starting new session (id=%s)", new_session.session_id)
+                self.all_sessions[new_session.session_id] = new_session
                 self.session_by_site[new_session.site_id] = new_session
 
                 yield DialogueSessionStarted(
@@ -312,11 +317,11 @@ class DialogueHermesMqtt(HermesClient):
         typing.Union[AsrStartListening, AsrStopListening, SayType, DialogueError]
     ]:
         """Continue the existing session."""
-        site_session = self.session_by_site.get(continue_session.site_id)
+        site_session = self.all_sessions.get(continue_session.session_id)
 
         if site_session is None:
             _LOGGER.warning(
-                "No session at site %s. Cannot continue.", continue_session.site_id
+                "No session for id %s. Cannot continue.", continue_session.session_id
             )
             return
 
@@ -392,9 +397,9 @@ class DialogueHermesMqtt(HermesClient):
         self, end_session: DialogueEndSession
     ) -> typing.AsyncIterable[typing.Union[EndSessionType, StartSessionType, SayType]]:
         """End the current session."""
-        site_session = self.session_by_site.get(end_session.site_id)
+        site_session = self.all_sessions.get(end_session.session_id)
         if not site_session:
-            _LOGGER.warning("No session at site %s", end_session.site_id)
+            _LOGGER.warning("No session for id %s. Cannot end.", end_session.session_id)
             return
 
         try:
@@ -414,7 +419,9 @@ class DialogueHermesMqtt(HermesClient):
 
             _LOGGER.debug("Session ended nominally: %s", site_session.session_id)
             async for end_result in self.end_session(
-                DialogueSessionTerminationReason.NOMINAL, site_id=site_session.site_id
+                DialogueSessionTerminationReason.NOMINAL,
+                site_id=site_session.site_id,
+                session_id=site_session.session_id,
             ):
                 yield end_result
         except Exception as e:
@@ -433,12 +440,12 @@ class DialogueHermesMqtt(HermesClient):
             )
 
     async def end_session(
-        self, reason: DialogueSessionTerminationReason, site_id: str
+        self, reason: DialogueSessionTerminationReason, site_id: str, session_id: str
     ) -> typing.AsyncIterable[typing.Union[EndSessionType, StartSessionType, SayType]]:
         """End current session and start queued session."""
-        site_session = self.session_by_site.pop(site_id, None)
+        site_session = self.all_sessions.pop(session_id, None)
         if not site_session:
-            _LOGGER.warning("No session for site %s", site_id)
+            _LOGGER.warning("No session for id %s", session_id)
             return
 
         if site_session.start_session.init.type != DialogueActionType.NOTIFICATION:
@@ -474,11 +481,15 @@ class DialogueHermesMqtt(HermesClient):
     ]:
         """Handle ASR text captured for session."""
         try:
-            site_session = self.session_by_site.get(text_captured.site_id)
+            if not text_captured.session_id:
+                _LOGGER.warning("Missing session id on text captured message.")
+                return
+
+            site_session = self.all_sessions.get(text_captured.session_id)
             if site_session is None:
                 _LOGGER.warning(
-                    "No session for site %s. Dropping captured text from ASR.",
-                    text_captured.site_id,
+                    "No session for id %s. Dropping captured text from ASR.",
+                    text_captured.session_id,
                 )
                 return
 
@@ -513,10 +524,15 @@ class DialogueHermesMqtt(HermesClient):
     async def handle_recognized(self, recognition: NluIntent) -> None:
         """Intent successfully recognized."""
         try:
-            site_session = self.session_by_site.get(recognition.site_id)
+            if not recognition.session_id:
+                _LOGGER.warning("Missing session id on intent message.")
+                return
+
+            site_session = self.all_sessions.get(recognition.session_id)
             if site_session is None:
                 _LOGGER.warning(
-                    "No session for site %s. Dropping recognition.", recognition.site_id
+                    "No session for id %s. Dropping recognition.",
+                    recognition.session_id,
                 )
                 return
 
@@ -533,14 +549,15 @@ class DialogueHermesMqtt(HermesClient):
     ]:
         """Failed to recognized intent."""
         try:
-            site_session = self.session_by_site.get(not_recognized.site_id)
+            if not not_recognized.session_id:
+                _LOGGER.debug("Missing session id on not recognized message")
+                return
 
-            if site_session is None or (
-                site_session.session_id != not_recognized.session_id
-            ):
+            site_session = self.all_sessions.get(not_recognized.session_id)
+
+            if site_session is None:
                 _LOGGER.warning(
-                    "No session for site %s with id %s",
-                    not_recognized.site_id,
+                    "No session for id %s. Dropping not recognized.",
                     not_recognized.session_id,
                 )
                 return
@@ -564,6 +581,7 @@ class DialogueHermesMqtt(HermesClient):
                 async for end_result in self.end_session(
                     DialogueSessionTerminationReason.INTENT_NOT_RECOGNIZED,
                     site_id=not_recognized.site_id,
+                    session_id=not_recognized.session_id,
                 ):
                     yield end_result
         except Exception:
@@ -606,7 +624,8 @@ class DialogueHermesMqtt(HermesClient):
                 # Abort previous session
                 async for end_result in self.end_session(
                     DialogueSessionTerminationReason.ABORTED_BY_USER,
-                    site_id=detected.site_id,
+                    site_id=site_session.site_id,
+                    session_id=site_session.session_id,
                 ):
                     yield end_result
             else:
@@ -627,11 +646,11 @@ class DialogueHermesMqtt(HermesClient):
 
             # Check if we're still on the same session and step (i.e., no continues)
 
-            site_session = self.session_by_site.get(site_id)
+            site_session = self.all_sessions.get(session_id)
 
             if (
                 site_session
-                and (site_session.session_id == session_id)
+                and (site_session.site_id == site_id)
                 and (site_session.step == step)
             ):
                 _LOGGER.error("Session timed out for site %s: %s", site_id, session_id)
@@ -639,7 +658,9 @@ class DialogueHermesMqtt(HermesClient):
                 # Abort session
                 await self.publish_all(
                     self.end_session(
-                        DialogueSessionTerminationReason.TIMEOUT, site_id=site_id
+                        DialogueSessionTerminationReason.TIMEOUT,
+                        site_id=site_id,
+                        session_id=session_id,
                     )
                 )
         except Exception as e:
@@ -858,9 +879,4 @@ class DialogueHermesMqtt(HermesClient):
 
     def valid_session_id(self, session_id: str) -> bool:
         """True if payload session_id matches current session_id."""
-        for site_session in self.session_by_site.values():
-            if session_id == site_session.session_id:
-                return True
-
-        # No matching session
-        return False
+        return session_id in self.all_sessions
