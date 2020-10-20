@@ -6,7 +6,6 @@ import typing
 from pathlib import Path
 
 import paho.mqtt.client as mqtt
-
 import rhasspyhermes.cli as hermes_cli
 
 from . import DialogueHermesMqtt
@@ -31,6 +30,9 @@ def main():
         help="Seconds before a dialogue session times out (default: 30)",
     )
     parser.add_argument("--sound", nargs=2, action="append", help="Add WAV id/path")
+    parser.add_argument(
+        "--no-sound", action="append", help="Disable notification sounds for site id"
+    )
 
     hermes_cli.add_hermes_args(parser)
     args = parser.parse_args()
@@ -42,6 +44,9 @@ def main():
         sound[0]: Path(sound[1]) for sound in args.sound or []
     }
 
+    if args.no_sound:
+        _LOGGER.debug("Sound is disabled for sites %s", args.no_sound)
+
     # Listen for messages
     client = mqtt.Client()
     hermes = DialogueHermesMqtt(
@@ -50,6 +55,7 @@ def main():
         wakeword_ids=args.wakeword_id,
         session_timeout=args.session_timeout,
         sound_paths=sound_paths,
+        no_sound=args.no_sound,
     )
 
     _LOGGER.debug("Connecting to %s:%s", args.host, args.port)

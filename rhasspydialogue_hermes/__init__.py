@@ -121,6 +121,7 @@ class DialogueHermesMqtt(HermesClient):
         wakeword_ids: typing.Optional[typing.List[str]] = None,
         sound_paths: typing.Optional[typing.Dict[str, Path]] = None,
         session_timeout: float = 30.0,
+        no_sound: typing.Optional[typing.List[str]] = None,
     ):
         super().__init__("rhasspydialogue_hermes", client, site_ids=site_ids)
 
@@ -145,6 +146,7 @@ class DialogueHermesMqtt(HermesClient):
 
         self.wakeword_ids: typing.Set[str] = set(wakeword_ids or [])
         self.sound_paths = sound_paths or {}
+        self.no_sound: typing.Set[str] = set(no_sound or [])
 
         # Session timeout
         self.session_timeout = session_timeout
@@ -230,6 +232,7 @@ class DialogueHermesMqtt(HermesClient):
                 DialogueSessionTerminationReason.NOMINAL,
                 site_id=site_session.site_id,
                 session_id=site_session.session_id,
+                start_next_session=True,
             ):
                 yield end_result
         else:
@@ -241,12 +244,14 @@ class DialogueHermesMqtt(HermesClient):
             new_session.intent_filter = action.intent_filter
             new_session.send_intent_not_recognized = action.send_intent_not_recognized
 
-            if site_session:
-                # Existing session at this site
-                session_queue = self.session_queue_by_site[new_session.site_id]
+            start_new_session = True
 
+            if site_session:
                 if action.can_be_enqueued:
                     # Queue session for later
+                    session_queue = self.session_queue_by_site[new_session.site_id]
+
+                    start_new_session = False
                     session_queue.append(new_session)
 
                     yield DialogueSessionQueued(
@@ -255,9 +260,17 @@ class DialogueHermesMqtt(HermesClient):
                         custom_data=new_session.custom_data,
                     )
                 else:
-                    # Drop session
-                    _LOGGER.warning("Session was dropped: %s", start_session)
-            else:
+                    # Abort existing session
+                    _LOGGER.debug("Session aborted: %s", site_session.session_id)
+                    async for end_result in self.end_session(
+                        DialogueSessionTerminationReason.ABORTED_BY_USER,
+                        site_id=site_session.site_id,
+                        session_id=site_session.session_id,
+                        start_next_session=False,
+                    ):
+                        yield end_result
+
+            if start_new_session:
                 # Start new session
                 _LOGGER.debug("Starting new session (id=%s)", new_session.session_id)
                 self.all_sessions[new_session.session_id] = new_session
@@ -304,12 +317,12 @@ class DialogueHermesMqtt(HermesClient):
                     lang=new_session.lang,
                 )
 
-            # Set up timeout
-            asyncio.create_task(
-                self.handle_session_timeout(
-                    new_session.site_id, new_session.session_id, new_session.step
+                # Set up timeout
+                asyncio.create_task(
+                    self.handle_session_timeout(
+                        new_session.site_id, new_session.session_id, new_session.step
+                    )
                 )
-            )
 
     async def handle_continue(
         self, continue_session: DialogueContinueSession
@@ -422,6 +435,7 @@ class DialogueHermesMqtt(HermesClient):
                 DialogueSessionTerminationReason.NOMINAL,
                 site_id=site_session.site_id,
                 session_id=site_session.session_id,
+                start_next_session=True,
             ):
                 yield end_result
         except Exception as e:
@@ -440,38 +454,42 @@ class DialogueHermesMqtt(HermesClient):
             )
 
     async def end_session(
-        self, reason: DialogueSessionTerminationReason, site_id: str, session_id: str
+        self,
+        reason: DialogueSessionTerminationReason,
+        site_id: str,
+        session_id: str,
+        start_next_session: bool,
     ) -> typing.AsyncIterable[typing.Union[EndSessionType, StartSessionType, SayType]]:
         """End current session and start queued session."""
         site_session = self.all_sessions.pop(session_id, None)
-        if not site_session:
-            _LOGGER.warning("No session for id %s", session_id)
-            return
+        if site_session:
+            # End the existing session
+            if site_session.start_session.init.type != DialogueActionType.NOTIFICATION:
+                # Stop listening
+                yield AsrStopListening(
+                    site_id=site_session.site_id, session_id=site_session.session_id
+                )
 
-        if site_session.start_session.init.type != DialogueActionType.NOTIFICATION:
-            # Stop listening
-            yield AsrStopListening(
-                site_id=site_session.site_id, session_id=site_session.session_id
+            yield DialogueSessionEnded(
+                site_id=site_id,
+                session_id=site_session.session_id,
+                custom_data=site_session.custom_data,
+                termination=DialogueSessionTermination(reason=reason),
             )
-
-        yield DialogueSessionEnded(
-            site_id=site_id,
-            session_id=site_session.session_id,
-            custom_data=site_session.custom_data,
-            termination=DialogueSessionTermination(reason=reason),
-        )
+        else:
+            _LOGGER.warning("No session for id %s", session_id)
 
         # Check session queue
-        session_queue = self.session_queue_by_site[site_session.site_id]
+        session_queue = self.session_queue_by_site[site_id]
         if session_queue:
-            _LOGGER.debug("Handling queued session")
-            async for start_result in self.start_session(session_queue.popleft()):
-                yield start_result
+            if start_next_session:
+                _LOGGER.debug("Handling queued session")
+                async for start_result in self.start_session(session_queue.popleft()):
+                    yield start_result
         else:
             # Enable hotword if no queued sessions
             yield HotwordToggleOn(
-                site_id=site_session.site_id,
-                reason=HotwordToggleReason.DIALOGUE_SESSION,
+                site_id=site_id, reason=HotwordToggleReason.DIALOGUE_SESSION
             )
 
     async def handle_text_captured(
@@ -562,6 +580,10 @@ class DialogueHermesMqtt(HermesClient):
                 )
                 return
 
+            if not_recognized.custom_data is not None:
+                # Overwrite custom data
+                site_session.custom_data = not_recognized.custom_data
+
             _LOGGER.warning(
                 "No intent recognized (site_id=%s, session_id=%s)",
                 not_recognized.site_id,
@@ -582,6 +604,7 @@ class DialogueHermesMqtt(HermesClient):
                     DialogueSessionTerminationReason.INTENT_NOT_RECOGNIZED,
                     site_id=not_recognized.site_id,
                     session_id=not_recognized.session_id,
+                    start_next_session=True,
                 ):
                     yield end_result
         except Exception:
@@ -621,11 +644,12 @@ class DialogueHermesMqtt(HermesClient):
                 # Jump the queue
                 self.session_queue_by_site[site_session.site_id].appendleft(new_session)
 
-                # Abort previous session
+                # Abort previous session and start queued session
                 async for end_result in self.end_session(
                     DialogueSessionTerminationReason.ABORTED_BY_USER,
                     site_id=site_session.site_id,
                     session_id=site_session.session_id,
+                    start_next_session=True,
                 ):
                     yield end_result
             else:
@@ -661,6 +685,7 @@ class DialogueHermesMqtt(HermesClient):
                         DialogueSessionTerminationReason.TIMEOUT,
                         site_id=site_id,
                         session_id=session_id,
+                        start_next_session=True,
                     )
                 )
         except Exception as e:
@@ -798,7 +823,9 @@ class DialogueHermesMqtt(HermesClient):
             if block:
                 # Wait for finished event
                 _LOGGER.debug(
-                    "Waiting for sayFinished (timeout=%s)", self.say_finished_timeout
+                    "Waiting for sayFinished (id=%s, timeout=%s)",
+                    finished_id,
+                    self.say_finished_timeout,
                 )
                 await asyncio.wait_for(
                     finished_event.wait(), timeout=self.say_finished_timeout
@@ -825,6 +852,10 @@ class DialogueHermesMqtt(HermesClient):
         block: bool = True,
     ) -> typing.AsyncIterable[SoundsType]:
         """Play WAV sound through audio out if it exists."""
+        if site_id in self.no_sound:
+            _LOGGER.debug("Sound is disabled for site %s", site_id)
+            return
+
         site_id = site_id or self.site_id
         wav_path = self.sound_paths.get(sound_name)
         if wav_path:
@@ -859,7 +890,11 @@ class DialogueHermesMqtt(HermesClient):
                 if block:
                     wav_duration = get_wav_duration(wav_bytes)
                     wav_timeout = wav_duration + self.sound_timeout_extra
-                    _LOGGER.debug("Waiting for playFinished (timeout=%s)", wav_timeout)
+                    _LOGGER.debug(
+                        "Waiting for playFinished (id=%s, timeout=%s)",
+                        finished_id,
+                        wav_timeout,
+                    )
                     await asyncio.wait_for(finished_event.wait(), timeout=wav_timeout)
             except asyncio.TimeoutError:
                 _LOGGER.warning("Did not receive sayFinished before timeout")
