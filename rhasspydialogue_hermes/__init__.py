@@ -1,11 +1,15 @@
 """Hermes MQTT server for Rhasspy Dialogue Mananger"""
 import asyncio
+import io
+import json
 import logging
 import typing
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
+
+import wavchunk
 
 from rhasspyhermes.asr import (
     AsrStartListening,
@@ -122,6 +126,7 @@ class DialogueHermesMqtt(HermesClient):
         sound_paths: typing.Optional[typing.Dict[str, Path]] = None,
         session_timeout: float = 30.0,
         no_sound: typing.Optional[typing.List[str]] = None,
+        volume: typing.Optional[float] = None,
     ):
         super().__init__("rhasspydialogue_hermes", client, site_ids=site_ids)
 
@@ -147,6 +152,7 @@ class DialogueHermesMqtt(HermesClient):
         self.wakeword_ids: typing.Set[str] = set(wakeword_ids or [])
         self.sound_paths = sound_paths or {}
         self.no_sound: typing.Set[str] = set(no_sound or [])
+        self.volume = volume
 
         # Session timeout
         self.session_timeout = session_timeout
@@ -866,6 +872,22 @@ class DialogueHermesMqtt(HermesClient):
             _LOGGER.debug("Playing WAV %s", str(wav_path))
             wav_bytes = wav_path.read_bytes()
 
+            try:
+                if (self.volume is not None) and (self.volume != 1.0):
+                    # Pack volume JSON into INFO chunk
+                    with io.BytesIO() as wav_out_io:
+                        with io.BytesIO(wav_bytes) as wav_in_io:
+                            wavchunk.add_chunk(
+                                wav_in_io,
+                                chunk_data=json.dumps({"volume": self.volume}).encode(),
+                                out_file=wav_out_io,
+                            )
+
+                        wav_bytes = wav_out_io.getvalue()
+            except Exception:
+                _LOGGER.exception("maybe_play_sound.volume")
+
+            # Send messages
             request_id = request_id or str(uuid4())
             finished_event = asyncio.Event()
             finished_id = request_id
