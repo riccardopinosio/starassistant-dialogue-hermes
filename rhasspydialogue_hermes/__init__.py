@@ -1,15 +1,15 @@
 """Hermes MQTT server for Rhasspy Dialogue Mananger"""
 import asyncio
+import audioop
 import io
 import json
 import logging
 import typing
+import wave
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
-
-import wavchunk
 
 from rhasspyhermes.asr import (
     AsrStartListening,
@@ -872,20 +872,8 @@ class DialogueHermesMqtt(HermesClient):
             _LOGGER.debug("Playing WAV %s", str(wav_path))
             wav_bytes = wav_path.read_bytes()
 
-            try:
-                if (self.volume is not None) and (self.volume != 1.0):
-                    # Pack volume JSON into INFO chunk
-                    with io.BytesIO() as wav_out_io:
-                        with io.BytesIO(wav_bytes) as wav_in_io:
-                            wavchunk.add_chunk(
-                                wav_in_io,
-                                chunk_data=json.dumps({"volume": self.volume}).encode(),
-                                out_file=wav_out_io,
-                            )
-
-                        wav_bytes = wav_out_io.getvalue()
-            except Exception:
-                _LOGGER.exception("maybe_play_sound.volume")
+            if (self.volume is not None) and (self.volume != 1.0):
+                wav_bytes = DialogueHermesMqtt.change_volume(wav_bytes, self.volume)
 
             # Send messages
             request_id = request_id or str(uuid4())
@@ -937,3 +925,43 @@ class DialogueHermesMqtt(HermesClient):
     def valid_session_id(self, session_id: str) -> bool:
         """True if payload session_id matches current session_id."""
         return session_id in self.all_sessions
+
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def change_volume(wav_bytes: bytes, volume: float) -> bytes:
+        """Scale WAV amplitude by factor (0-1)"""
+        if volume == 1.0:
+            return wav_bytes
+
+        try:
+            with io.BytesIO(wav_bytes) as wav_in_io:
+                # Re-write WAV with adjusted volume
+                with io.BytesIO() as wav_out_io:
+                    wav_out_file: wave.Wave_write = wave.open(wav_out_io, "wb")
+                    wav_in_file: wave.Wave_read = wave.open(wav_in_io, "rb")
+
+                    with wav_out_file:
+                        with wav_in_file:
+                            sample_width = wav_in_file.getsampwidth()
+
+                            # Copy WAV details
+                            wav_out_file.setframerate(wav_in_file.getframerate())
+                            wav_out_file.setsampwidth(sample_width)
+                            wav_out_file.setnchannels(wav_in_file.getnchannels())
+
+                            # Adjust amplitude
+                            wav_out_file.writeframes(
+                                audioop.mul(
+                                    wav_in_file.readframes(wav_in_file.getnframes()),
+                                    sample_width,
+                                    volume,
+                                )
+                            )
+
+                    wav_bytes = wav_out_io.getvalue()
+
+        except Exception:
+            _LOGGER.exception("change_volume")
+
+        return wav_bytes
