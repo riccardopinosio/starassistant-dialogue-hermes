@@ -2,7 +2,6 @@
 import asyncio
 import audioop
 import io
-import json
 import logging
 import typing
 import wave
@@ -107,6 +106,7 @@ class SessionInfo:
     # Wake word that activated this session (if any)
     detected: typing.Optional[HotwordDetected] = None
     wakeword_id: str = ""
+    group_id: str = ""
 
 
 # -----------------------------------------------------------------------------
@@ -127,6 +127,7 @@ class DialogueHermesMqtt(HermesClient):
         session_timeout: float = 30.0,
         no_sound: typing.Optional[typing.List[str]] = None,
         volume: typing.Optional[float] = None,
+        group_separator: typing.Optional[str] = None,
     ):
         super().__init__("rhasspydialogue_hermes", client, site_ids=site_ids)
 
@@ -153,6 +154,7 @@ class DialogueHermesMqtt(HermesClient):
         self.sound_paths = sound_paths or {}
         self.no_sound: typing.Set[str] = set(no_sound or [])
         self.volume = volume
+        self.group_separator = group_separator or ""
 
         # Session timeout
         self.session_timeout = session_timeout
@@ -623,6 +625,28 @@ class DialogueHermesMqtt(HermesClient):
     ]:
         """Wake word was detected."""
         try:
+            group_id = ""
+
+            if self.group_separator:
+                # Split site_id into <GROUP>[separator]<NAME>
+                site_id_parts = detected.site_id.split(self.group_separator, maxsplit=1)
+                if len(site_id_parts) > 1:
+                    group_id = site_id_parts[0]
+
+            if group_id:
+                # Check if a session from the same group is already active.
+                # If so, ignore this wake up.
+                for session in self.all_sessions.values():
+                    if session.group_id == group_id:
+                        _LOGGER.debug(
+                            "Group %s already has a session (%s). Ignoring wake word detection from %s.",
+                            group_id,
+                            session.site_id,
+                            detected.site_id,
+                        )
+                        return
+
+            # Create new session
             session_id = (
                 detected.session_id or f"{detected.site_id}-{wakeword_id}-{uuid4()}"
             )
@@ -637,6 +661,7 @@ class DialogueHermesMqtt(HermesClient):
                 detected=detected,
                 wakeword_id=wakeword_id,
                 lang=detected.lang,
+                group_id=group_id,
             )
 
             # Play wake sound before ASR starts listening
