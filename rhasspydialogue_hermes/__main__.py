@@ -42,6 +42,11 @@ def main():
         "--group-separator",
         help="String that separates site group from the rest of the site id (default: none)",
     )
+    parser.add_argument(
+        "--min-asr-confidence",
+        type=float,
+        help="Minimum ASR confidence/likelihood value before nluNotRecognized is produced",
+    )
 
     hermes_cli.add_hermes_args(parser)
     args = parser.parse_args()
@@ -67,6 +72,7 @@ def main():
         no_sound=args.no_sound,
         volume=args.volume,
         group_separator=args.group_separator,
+        min_asr_confidence=args.min_asr_confidence,
     )
 
     _LOGGER.debug("Connecting to %s:%s", args.host, args.port)

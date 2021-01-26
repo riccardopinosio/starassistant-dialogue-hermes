@@ -128,6 +128,7 @@ class DialogueHermesMqtt(HermesClient):
         no_sound: typing.Optional[typing.List[str]] = None,
         volume: typing.Optional[float] = None,
         group_separator: typing.Optional[str] = None,
+        min_asr_confidence: typing.Optional[float] = None,
     ):
         super().__init__("rhasspydialogue_hermes", client, site_ids=site_ids)
 
@@ -174,6 +175,10 @@ class DialogueHermesMqtt(HermesClient):
 
         # Intent filter applied to NLU queries by default
         self.default_intent_filter: typing.Optional[typing.List[str]] = None
+
+        # Minimum confidence before hermes/asr/textCaptured is automatically
+        # turned into a hermes/nlu/intentNotRecognized
+        self.min_asr_confidence = min_asr_confidence or 0.0
 
     # -------------------------------------------------------------------------
 
@@ -503,7 +508,9 @@ class DialogueHermesMqtt(HermesClient):
     async def handle_text_captured(
         self, text_captured: AsrTextCaptured
     ) -> typing.AsyncIterable[
-        typing.Union[AsrStopListening, HotwordToggleOn, NluQuery]
+        typing.Union[
+            AsrStopListening, HotwordToggleOn, NluQuery, NluIntentNotRecognized
+        ]
     ]:
         """Handle ASR text captured for session."""
         try:
@@ -535,15 +542,34 @@ class DialogueHermesMqtt(HermesClient):
                 reason=HotwordToggleReason.DIALOGUE_SESSION,
             )
 
-            # Perform query
-            yield NluQuery(
-                input=text_captured.text,
-                intent_filter=site_session.intent_filter or self.default_intent_filter,
-                session_id=site_session.session_id,
-                site_id=site_session.site_id,
-                wakeword_id=text_captured.wakeword_id or site_session.wakeword_id,
-                lang=text_captured.lang or site_session.lang,
-            )
+            if (self.min_asr_confidence is not None) and (
+                text_captured.likelihood < self.min_asr_confidence
+            ):
+                # Transcription is below thresold.
+                # Don't actually do an NLU query, just reject as "not recognized".
+                _LOGGER.debug(
+                    "Transcription is below confidence threshold (%s < %s): %s",
+                    text_captured.likelihood,
+                    self.min_asr_confidence,
+                    text_captured.text,
+                )
+
+                yield NluIntentNotRecognized(
+                    input=text_captured.text,
+                    site_id=site_session.site_id,
+                    session_id=site_session.session_id,
+                )
+            else:
+                # Perform query
+                yield NluQuery(
+                    input=text_captured.text,
+                    intent_filter=site_session.intent_filter
+                    or self.default_intent_filter,
+                    session_id=site_session.session_id,
+                    site_id=site_session.site_id,
+                    wakeword_id=text_captured.wakeword_id or site_session.wakeword_id,
+                    lang=text_captured.lang or site_session.lang,
+                )
         except Exception:
             _LOGGER.exception("handle_text_captured")
 
