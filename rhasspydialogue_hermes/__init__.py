@@ -476,6 +476,9 @@ class DialogueHermesMqtt(HermesClient):
         """End current session and start queued session."""
         site_session = self.all_sessions.pop(session_id, None)
         if site_session:
+            # Remove session for site
+            self.session_by_site.pop(site_session.site_id, None)
+
             # End the existing session
             if site_session.start_session.init.type != DialogueActionType.NOTIFICATION:
                 # Stop listening
