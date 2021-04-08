@@ -573,6 +573,7 @@ class DialogueHermesMqtt(HermesClient):
                     wakeword_id=text_captured.wakeword_id or site_session.wakeword_id,
                     lang=text_captured.lang or site_session.lang,
                     custom_data=site_session.custom_data,
+                    asr_confidence=text_captured.likelihood,
                 )
         except Exception:
             _LOGGER.exception("handle_text_captured")
