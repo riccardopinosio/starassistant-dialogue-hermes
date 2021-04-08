@@ -129,6 +129,7 @@ class DialogueHermesMqtt(HermesClient):
         volume: typing.Optional[float] = None,
         group_separator: typing.Optional[str] = None,
         min_asr_confidence: typing.Optional[float] = None,
+        say_chars_per_second: float = 33.0,
     ):
         super().__init__("rhasspydialogue_hermes", client, site_ids=site_ids)
 
@@ -165,7 +166,8 @@ class DialogueHermesMqtt(HermesClient):
             typing.Type[Message], typing.Dict[typing.Optional[str], asyncio.Event]
         ] = defaultdict(dict)
 
-        self.say_finished_timeout: float = 10
+        # Used to estimate how long a TTS phrase will take to speak
+        self.say_chars_per_second = say_chars_per_second
 
         # Seconds added to sound timeout
         self.sound_timeout_extra: float = 0.25
@@ -891,13 +893,20 @@ class DialogueHermesMqtt(HermesClient):
 
             if block:
                 # Wait for finished event
+                say_finished_timeout = 10.0
+                if self.say_chars_per_second > 0:
+                    # Estimate timeout based on text length
+                    say_finished_timeout = max(
+                        say_finished_timeout, len(text) / self.say_chars_per_second
+                    )
+
                 _LOGGER.debug(
                     "Waiting for sayFinished (id=%s, timeout=%s)",
                     finished_id,
-                    self.say_finished_timeout,
+                    say_finished_timeout,
                 )
                 await asyncio.wait_for(
-                    finished_event.wait(), timeout=self.say_finished_timeout
+                    finished_event.wait(), timeout=say_finished_timeout
                 )
         except asyncio.TimeoutError:
             _LOGGER.warning("Did not receive sayFinished before timeout")

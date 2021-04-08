@@ -48,6 +48,12 @@ def main():
         type=float,
         help="Minimum ASR confidence/likelihood value before nluNotRecognized is produced",
     )
+    parser.add_argument(
+        "--say-chars-per-second",
+        type=float,
+        default=33.0,
+        help="Number of characters to per second of speech for estimating TTS timeout",
+    )
 
     hermes_cli.add_hermes_args(parser)
     args = parser.parse_args()
@@ -74,6 +80,7 @@ def main():
         volume=args.volume,
         group_separator=args.group_separator,
         min_asr_confidence=args.min_asr_confidence,
+        say_chars_per_second=args.say_chars_per_second,
     )
 
     _LOGGER.debug("Connecting to %s:%s", args.host, args.port)
