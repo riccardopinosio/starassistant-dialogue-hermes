@@ -564,6 +564,12 @@ class DialogueHermesMqtt(HermesClient):
                 )
             else:
                 # Perform query
+                custom_entities: typing.Optional[typing.Dict[str, typing.Any]] = None
+
+                # Copy custom entities from hotword detected
+                if site_session.detected:
+                    custom_entities = site_session.detected.custom_entities
+
                 yield NluQuery(
                     input=text_captured.text,
                     intent_filter=site_session.intent_filter
@@ -574,6 +580,7 @@ class DialogueHermesMqtt(HermesClient):
                     lang=text_captured.lang or site_session.lang,
                     custom_data=site_session.custom_data,
                     asr_confidence=text_captured.likelihood,
+                    custom_entities=custom_entities,
                 )
         except Exception:
             _LOGGER.exception("handle_text_captured")
