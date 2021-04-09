@@ -182,6 +182,10 @@ class DialogueHermesMqtt(HermesClient):
         # turned into a hermes/nlu/intentNotRecognized
         self.min_asr_confidence = min_asr_confidence or 0.0
 
+        # Locks by group id used to prevent multiple sessions from starting at the same time
+        self.global_wake_lock = asyncio.Lock()
+        self.group_wake_lock: typing.Dict[str, asyncio.Lock] = {}
+
     # -------------------------------------------------------------------------
 
     async def handle_start(
@@ -664,6 +668,8 @@ class DialogueHermesMqtt(HermesClient):
         typing.Union[EndSessionType, StartSessionType, SayType, SoundsType]
     ]:
         """Wake word was detected."""
+        group_lock: typing.Optional[asyncio.Lock] = None
+
         try:
             group_id = ""
 
@@ -674,10 +680,27 @@ class DialogueHermesMqtt(HermesClient):
                     group_id = site_id_parts[0]
 
             if group_id:
+                # Use a lock per group id to prevent multiple satellites from
+                # starting sessions while the wake up sound is being played.
+                async with self.global_wake_lock:
+                    group_lock = self.group_wake_lock.get(group_id)
+                    if group_lock is None:
+                        # Create new lock for group
+                        group_lock = asyncio.Lock()
+                        self.group_wake_lock[group_id] = group_lock
+
+                assert group_lock is not None
+                await group_lock.acquire()
+
                 # Check if a session from the same group is already active.
                 # If so, ignore this wake up.
                 for session in self.all_sessions.values():
-                    if session.group_id == group_id:
+                    # Also check if text has already been captured for this session.
+                    # This prevents a new session for a group from being blocked
+                    # because a previous (completed) one has not timed out yet.
+                    if (session.group_id == group_id) and (
+                        session.text_captured is None
+                    ):
                         _LOGGER.debug(
                             "Group %s already has a session (%s). Ignoring wake word detection from %s.",
                             group_id,
@@ -732,6 +755,9 @@ class DialogueHermesMqtt(HermesClient):
             yield DialogueError(
                 error=str(e), context=str(detected), site_id=detected.site_id
             )
+        finally:
+            if group_lock is not None:
+                group_lock.release()
 
     async def handle_session_timeout(self, site_id: str, session_id: str, step: int):
         """Called when a session has timed out."""
