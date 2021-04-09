@@ -3,6 +3,7 @@ import asyncio
 import audioop
 import io
 import logging
+import random
 import typing
 import wave
 from collections import defaultdict, deque
@@ -963,7 +964,14 @@ class DialogueHermesMqtt(HermesClient):
         site_id = site_id or self.site_id
         wav_path = self.sound_paths.get(sound_name)
         if wav_path:
-            if not wav_path.is_file():
+            if wav_path.is_dir():
+                wav_file_paths = list(wav_path.rglob("*.wav"))
+                if not wav_file_paths:
+                    _LOGGER.debug("No WAV files found in %s", str(wav_path))
+                    return
+
+                wav_path = random.choice(wav_file_paths)
+            elif not wav_path.is_file():
                 _LOGGER.error("WAV does not exist: %s", str(wav_path))
                 return
 

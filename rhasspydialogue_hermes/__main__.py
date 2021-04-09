@@ -30,7 +30,12 @@ def main():
         default=30.0,
         help="Seconds before a dialogue session times out (default: 30)",
     )
-    parser.add_argument("--sound", nargs=2, action="append", help="Add WAV id/path")
+    parser.add_argument(
+        "--sound",
+        nargs=2,
+        action="append",
+        help="Add WAV id/path or directory of WAV files",
+    )
     parser.add_argument(
         "--no-sound", action="append", help="Disable notification sounds for site id"
     )
