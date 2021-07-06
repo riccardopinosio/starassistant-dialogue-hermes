@@ -58,6 +58,11 @@ def main():
         default=33.0,
         help="Number of characters to per second of speech for estimating TTS timeout",
     )
+    parser.add_argument(
+        "--sound-suffix",
+        action="append",
+        help="Add file extension (suffix) to search for with feedback sound path is a directory (e.g. '.wav')",
+    )
 
     hermes_cli.add_hermes_args(parser)
     args = parser.parse_args()
@@ -72,6 +77,9 @@ def main():
     if args.no_sound:
         _LOGGER.debug("Sound is disabled for sites %s", args.no_sound)
 
+    if args.sound_suffix:
+        args.sound_suffix = set(args.sound_suffix)
+
     # Listen for messages
     client = mqtt.Client()
     hermes = DialogueHermesMqtt(
@@ -85,6 +93,7 @@ def main():
         group_separator=args.group_separator,
         min_asr_confidence=args.min_asr_confidence,
         say_chars_per_second=args.say_chars_per_second,
+        sound_suffixes=args.sound_suffix,
     )
 
     _LOGGER.debug("Connecting to %s:%s", args.host, args.port)

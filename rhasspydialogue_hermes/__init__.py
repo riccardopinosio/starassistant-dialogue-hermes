@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
+import audioread
+import soundfile
 from rhasspyhermes.asr import (
     AsrStartListening,
     AsrStopListening,
@@ -131,6 +133,7 @@ class DialogueHermesMqtt(HermesClient):
         group_separator: typing.Optional[str] = None,
         min_asr_confidence: typing.Optional[float] = None,
         say_chars_per_second: float = 33.0,
+        sound_suffixes: typing.Optional[typing.Set[str]] = None,
     ):
         super().__init__("rhasspydialogue_hermes", client, site_ids=site_ids)
 
@@ -186,6 +189,9 @@ class DialogueHermesMqtt(HermesClient):
         # Locks by group id used to prevent multiple sessions from starting at the same time
         self.global_wake_lock = asyncio.Lock()
         self.group_wake_lock: typing.Dict[str, asyncio.Lock] = {}
+
+        # Suffixes to search for when feedback sound path is a directory
+        self.sound_suffixes = sound_suffixes or {".wav"}
 
     # -------------------------------------------------------------------------
 
@@ -962,21 +968,27 @@ class DialogueHermesMqtt(HermesClient):
             return
 
         site_id = site_id or self.site_id
-        wav_path = self.sound_paths.get(sound_name)
-        if wav_path:
-            if wav_path.is_dir():
-                wav_file_paths = list(wav_path.rglob("*.wav"))
-                if not wav_file_paths:
-                    _LOGGER.debug("No WAV files found in %s", str(wav_path))
+        sound_path = self.sound_paths.get(sound_name)
+        if sound_path:
+            if sound_path.is_dir():
+                sound_file_paths = [
+                    p
+                    for p in sound_path.rglob("*")
+                    if p.is_file() and (p.suffix in self.sound_suffixes)
+                ]
+                if not sound_file_paths:
+                    _LOGGER.debug("No sound files found in %s", str(sound_path))
                     return
 
-                wav_path = random.choice(wav_file_paths)
-            elif not wav_path.is_file():
-                _LOGGER.error("WAV does not exist: %s", str(wav_path))
+                sound_path = random.choice(sound_file_paths)
+            elif not sound_path.is_file():
+                _LOGGER.error("Sound does not exist: %s", str(sound_path))
                 return
 
-            _LOGGER.debug("Playing WAV %s", str(wav_path))
-            wav_bytes = wav_path.read_bytes()
+            _LOGGER.debug("Playing sound %s", str(sound_path))
+
+            # Convert to WAV
+            wav_bytes = DialogueHermesMqtt.convert_to_wav(sound_path)
 
             if (self.volume is not None) and (self.volume != 1.0):
                 wav_bytes = DialogueHermesMqtt.change_volume(wav_bytes, self.volume)
@@ -1025,6 +1037,39 @@ class DialogueHermesMqtt(HermesClient):
                     site_id=site_id, reason=HotwordToggleReason.PLAY_AUDIO
                 )
                 yield AsrToggleOn(site_id=site_id, reason=AsrToggleReason.PLAY_AUDIO)
+
+    @staticmethod
+    def convert_to_wav(sound_path: typing.Union[str, Path]) -> bytes:
+        """Open sound file and convert to WAV format"""
+        sound_path = str(sound_path)
+
+        try:
+            # Try as WAV first
+            with wave.open(sound_path, "rb"):
+                # Already a WAV file
+                return open(sound_path, "rb").read()
+        except Exception:
+            # Try soundfile
+            try:
+                with open(sound_path, "rb") as sound_file, io.BytesIO() as wav_out:
+                    audio_data, sample_rate = soundfile.read(sound_file)
+                    soundfile.write(wav_out, audio_data, sample_rate, format="WAV")
+                    return wav_out.getvalue()
+            except Exception:
+                # Fall back to audioread
+                with audioread.audio_open(
+                    sound_path
+                ) as sound_file, io.BytesIO() as wav_io:
+                    wav_write: wave.Wave_write = wave.open(wav_io, "wb")
+                    with wav_write:
+                        wav_write.setnchannels(sound_file.channels)  # type: ignore
+                        wav_write.setframerate(sound_file.samplerate)  # type: ignore
+                        wav_write.setsampwidth(2)  # fixed at 16-bits by audioread
+
+                        for sound_buffer in sound_file:
+                            wav_write.writeframes(sound_buffer)
+
+                    return wav_io.getvalue()
 
     # -------------------------------------------------------------------------
 
